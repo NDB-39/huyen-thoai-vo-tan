@@ -1,0 +1,6 @@
+{
+  "name": "Huyền Thoại Vô Tận",
+  "description": "Trò chơi phiêu lưu văn bản và tạo ảnh bằng công nghệ AI, với nhiều cài đặt độ khó, hỗ trợ sao lưu tiến trình và chuyển nhánh cốt truyện linh hoạt.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
