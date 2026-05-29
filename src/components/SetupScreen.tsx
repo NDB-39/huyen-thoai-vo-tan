@@ -43,6 +43,7 @@ export function SetupScreen({ onStart, settings, updateSettings }: SetupScreenPr
   const [imageListStr, setImageListStr] = useState(settings.imageModelsList.join(", "));
   const [txtModel, setTxtModel] = useState(settings.currentTextModel);
   const [imgModel, setImgModel] = useState(settings.currentImageModel);
+  const [imgRatio, setImgRatio] = useState(settings.imageRatio || "16:9");
 
   const generateScenarios = async (mode: GameMode) => {
     setIsLoadingScenarios(true);
@@ -110,7 +111,8 @@ Quy tắc:
       textModelsList: newTextList.length ? newTextList : ['openai', 'mistral', 'mistral-large', 'llama'],
       imageModelsList: newImgList.length ? newImgList : ['flux', 'turbo'],
       currentTextModel: txtModel,
-      currentImageModel: imgModel
+      currentImageModel: imgModel,
+      imageRatio: imgRatio
     });
     setShowSettings(false);
   };
@@ -249,6 +251,19 @@ Quy tắc:
               {imageListStr.split(',').map(s => s.trim()).filter(Boolean).map(m => (
                 <option key={m} value={m}>{m}</option>
               ))}
+            </select>
+          </div>
+
+          <div className="pt-4 border-t">
+            <label className="block text-sm font-semibold text-gray-700 mb-1">Tỉ lệ Hình Ảnh</label>
+            <select 
+              value={imgRatio} 
+              onChange={e => setImgRatio(e.target.value)}
+              className="w-full border rounded-lg p-2 text-sm"
+            >
+              <option value="16:9">16:9 (Ngang)</option>
+              <option value="9:16">9:16 (Dọc)</option>
+              <option value="1:1">1:1 (Vuông)</option>
             </select>
           </div>
 

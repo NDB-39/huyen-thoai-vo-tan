@@ -4,7 +4,7 @@
  */
 
 import { useState, useRef, useEffect, FormEvent } from "react";
-import { Send, Image as ImageIcon, Info, Save, Settings, Download, Upload, ArrowLeft, Trash2 } from "lucide-react";
+import { Send, Image as ImageIcon, Info, Save, Settings, Download, Upload, ArrowLeft, Trash2, RefreshCcw, ZoomIn, ZoomOut, X } from "lucide-react";
 import { Dialog } from "./components/Dialog";
 import { ChatEntry, Difficulty, GameState, GameMode, GameSettings } from "./types";
 import { motion, AnimatePresence } from "motion/react";
@@ -12,6 +12,7 @@ import { SetupScreen } from "./components/SetupScreen";
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { get, set, del } from 'idb-keyval';
+import { TransformWrapper, TransformComponent } from "react-zoom-pan-pinch";
 
 export default function App() {
   const [history, setHistory] = useState<ChatEntry[]>([]);
@@ -21,9 +22,10 @@ export default function App() {
   
   const [settings, setSettings] = useState<GameSettings>({
     textModelsList: ["openai", "mistral", "mistral-large", "llama"],
-    imageModelsList: ["flux", "turbo"],
+    imageModelsList: ["flux", "turbo", "zimage"],
     currentTextModel: "openai",
-    currentImageModel: "flux"
+    currentImageModel: "flux",
+    imageRatio: "16:9"
   });
 
   const [input, setInput] = useState("");
@@ -33,6 +35,15 @@ export default function App() {
   const [showSaveDialog, setShowSaveDialog] = useState(false);
   const [showLoadDialog, setShowLoadDialog] = useState(false);
   const [showSettingsDialog, setShowSettingsDialog] = useState(false);
+  const [viewingImage, setViewingImage] = useState<string | null>(null);
+  const [confirmConfig, setConfirmConfig] = useState<{isOpen: boolean, title: string, message: string, onConfirm: () => void}>({
+    isOpen: false, title: "", message: "", onConfirm: () => {}
+  });
+
+  const requestConfirm = (title: string, message: string, onConfirm: () => void) => {
+    setConfirmConfig({ isOpen: true, title, message, onConfirm });
+  };
+
   
   const [saveDataString, setSaveDataString] = useState("");
   const [loadDataString, setLoadDataString] = useState("");
@@ -42,6 +53,7 @@ export default function App() {
   const [imageListStr, setImageListStr] = useState(settings.imageModelsList.join(", "));
   const [txtModel, setTxtModel] = useState(settings.currentTextModel);
   const [imgModel, setImgModel] = useState(settings.currentImageModel);
+  const [imgRatio, setImgRatio] = useState(settings.imageRatio || "16:9");
 
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -87,6 +99,7 @@ export default function App() {
       setImageListStr(settings.imageModelsList.join(", "));
       setTxtModel(settings.currentTextModel);
       setImgModel(settings.currentImageModel);
+      setImgRatio(settings.imageRatio || "16:9");
     }
   }, [showSettingsDialog, settings]);
 
@@ -97,7 +110,8 @@ export default function App() {
       textModelsList: newTextList.length ? newTextList : ['openai'],
       imageModelsList: newImgList.length ? newImgList : ['flux'],
       currentTextModel: txtModel,
-      currentImageModel: imgModel
+      currentImageModel: imgModel,
+      imageRatio: imgRatio
     });
     setShowSettingsDialog(false);
   };
@@ -150,9 +164,12 @@ export default function App() {
         return true;
       case "/clear":
       case "/reset":
-        setHasStarted(false);
-        setHistory([]);
-        del('game-state').catch(console.error);
+        requestConfirm("Xác nhận Bắt đầu lại", "Bạn có chắc chắn muốn xóa toàn bộ tiến trình và chơi lại từ đầu không? Hành động này không thể hoàn tác.", () => {
+          setHasStarted(false);
+          setHistory([]);
+          del('game-state').catch(console.error);
+          setConfirmConfig(prev => ({ ...prev, isOpen: false }));
+        });
         return true;
       case "/stats":
         // Generate stats via AI
@@ -177,14 +194,60 @@ export default function App() {
     setHistory(prev => [...prev, { id: Date.now().toString(), role: "system", text }]);
   };
 
+  const deleteEntry = (id: string) => {
+    requestConfirm("Xác nhận Xóa", "Bạn có chắc chắn muốn xóa thông báo (hoặc ảnh) này khỏi lịch sử không?", () => {
+      setHistory(prev => prev.filter(entry => entry.id !== id));
+      setConfirmConfig(prev => ({ ...prev, isOpen: false }));
+    });
+  };
+
   const generateImage = async (prompt: string) => {
     setIsLoading(true);
     const entryId = Date.now().toString();
-    setHistory(prev => [...prev, { id: entryId, role: "system", text: "Đang tạo ảnh..." }]);
+    setHistory(prev => [...prev, { id: entryId, role: "system", text: "Đang phân tích & nội suy yêu cầu tạo ảnh..." }]);
     
     try {
+      // 1. Interpolate Prompt via AI
+      let modelSpecificInstruction = "Mô tả bằng tiếng Anh chi tiết, phong phú.";
+      if (settings.currentImageModel === "zimage") {
+        modelSpecificInstruction = "Mô tả bằng tiếng Anh chi tiết, tuyệt đẹp. Thêm các từ khóa như 'masterpiece, best quality, highly detailed, perfectly drawn' vào cuối mục mô tả. Từ khóa 'NEGATIVE_PROMPT: low quality, worst quality, mutated, extra limbs' có thể đưa ra phía sau.";
+      }
+      
+      const interpolationPrompt = `Dựa trên bối cảnh hiện tại của câu chuyện và yêu cầu vẽ: "${prompt}". Hãy tạo MỘT ĐOẠN VĂN TIẾNG ANH duy nhất mô tả hình ảnh tĩnh để làm prompt cho AI vẽ tranh. Không dùng list, không markdown, chỉ xuất văn bản prompt thuần túy. ${modelSpecificInstruction}`;
+
+      const res = await fetch("https://pollinations-proxy.spritenguyen.workers.dev/openai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ 
+          model: settings.currentTextModel || "openai",
+          messages: [
+            { role: "system", content: "Bạn là một chuyên gia Prompt Engineering cho AI vẽ tranh." },
+            { role: "user", content: interpolationPrompt }
+          ]
+        })
+      });
+
+      let finalPrompt = prompt;
+      if (res.ok) {
+        const data = await res.json();
+        finalPrompt = data.choices[0].message.content.trim();
+      }
+
+      setHistory(prev => prev.map(entry => 
+        entry.id === entryId ? { ...entry, text: "Đang vẽ ảnh với model " + settings.currentImageModel + "..." } : entry
+      ));
+
       const rand = Math.floor(Math.random() * 1000000);
-      const url = `https://pollinations-proxy.spritenguyen.workers.dev/prompt/${encodeURIComponent(prompt)}?model=${settings.currentImageModel}&nologo=true&seed=${rand}`;
+      let width = 1024;
+      let height = 576; // 16:9
+      
+      if (settings.imageRatio === "1:1") {
+        width = 1024; height = 1024;
+      } else if (settings.imageRatio === "9:16") {
+        width = 576; height = 1024;
+      }
+
+      const url = `https://pollinations-proxy.spritenguyen.workers.dev/prompt/${encodeURIComponent(finalPrompt)}?model=${settings.currentImageModel}&nologo=true&seed=${rand}&width=${width}&height=${height}`;
       
       // Attempt to load the image first before showing it
       const img = new Image();
@@ -281,15 +344,18 @@ export default function App() {
     try {
       const state: GameState = JSON.parse(loadDataString);
       if (state && state.history && Array.isArray(state.history)) {
-        setHistory(state.history);
-        if (state.difficulty) setDifficulty(state.difficulty);
-        if (state.mode) setMode(state.mode);
-        if (state.settings) setSettings(state.settings);
-        
-        setHasStarted(true);
-        setShowLoadDialog(false);
-        setLoadDataString("");
-        addSystemMessage("Đã tải tiến trình thành công!");
+        requestConfirm("Xác nhận Tải tiến trình", "Tải tiến trình mới sẽ ghi đè lên tiến trình hiện tại của bạn. Bạn có chắc chắn muốn Tải không?", () => {
+          setHistory(state.history);
+          if (state.difficulty) setDifficulty(state.difficulty);
+          if (state.mode) setMode(state.mode);
+          if (state.settings) setSettings(state.settings);
+          
+          setHasStarted(true);
+          setShowLoadDialog(false);
+          setLoadDataString("");
+          setConfirmConfig(prev => ({ ...prev, isOpen: false }));
+          setTimeout(() => addSystemMessage("Đã tải tiến trình thành công!"), 100);
+        });
       } else {
         addSystemMessage("Dữ liệu lưu không hợp lệ.");
       }
@@ -323,6 +389,10 @@ export default function App() {
         </div>
         
         <div className="flex items-center space-x-1 md:space-x-2">
+          <button onClick={() => handleCommand("/reset")} className="p-2 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded-lg transition-colors flex items-center space-x-1" title="Chơi lại">
+            <RefreshCcw size={20} /> <span className="hidden md:inline text-sm font-medium">Reset</span>
+          </button>
+          <div className="h-6 w-px bg-gray-200 mx-1 hidden md:block"></div>
           <button onClick={() => setShowSettingsDialog(true)} className="p-2 text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 rounded-lg transition-colors" title="Cài đặt">
             <Settings size={20} />
           </button>
@@ -361,7 +431,7 @@ export default function App() {
                 )}
                 
                 <div 
-                  className={`max-w-[85%] md:max-w-[75%] rounded-2xl p-4 ${
+                  className={`max-w-[85%] md:max-w-[75%] rounded-2xl p-4 relative group ${
                     entry.role === "user" 
                       ? "bg-indigo-600 text-white shadow-md shadow-indigo-200 rounded-tr-sm" 
                       : entry.role === "system"
@@ -370,13 +440,45 @@ export default function App() {
                   }`}
                 >
                   {entry.imageUrl ? (
-                    <img src={entry.imageUrl} alt="Generated" className="rounded-lg w-full h-auto shadow-sm" />
+                    <div className="relative">
+                      <img 
+                        src={entry.imageUrl} 
+                        alt="Generated" 
+                        className="rounded-lg w-full h-auto shadow-sm cursor-zoom-in" 
+                        onClick={() => setViewingImage(entry.imageUrl || null)}
+                      />
+                      <button 
+                        onClick={() => deleteEntry(entry.id)} 
+                        className="absolute top-2 right-2 p-2 bg-red-600 text-white rounded-lg shadow hover:bg-red-700 transition opacity-0 group-hover:opacity-100"
+                        title="Xóa thông báo/ảnh này"
+                      >
+                         <Trash2 size={16} />
+                      </button>
+                    </div>
                   ) : entry.role === "storyteller" ? (
-                    <div className="w-full max-w-none text-current">
+                    <div className="w-full max-w-none text-current relative">
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{entry.text}</ReactMarkdown>
+                      <button 
+                        onClick={() => deleteEntry(entry.id)} 
+                        className="absolute -top-2 -right-2 p-1.5 bg-gray-100 text-red-500 hover:text-red-700 rounded shadow-sm opacity-0 group-hover:opacity-100 transition"
+                        title="Xóa"
+                      >
+                         <Trash2 size={14} />
+                      </button>
                     </div>
                   ) : (
-                    <div className="whitespace-pre-wrap">{entry.text}</div>
+                    <div className="whitespace-pre-wrap relative">
+                      {entry.text}
+                      {(entry.role === "user" || entry.role === "system") && (
+                        <button 
+                          onClick={() => deleteEntry(entry.id)} 
+                          className={`absolute ${entry.role === "user" ? "-top-2 -left-2" : "top-0 right-0"} p-1.5 ${entry.role === "user" ? "bg-indigo-700 text-indigo-200 hover:text-white" : "bg-gray-300 text-gray-500 hover:text-red-600"} rounded shadow-sm opacity-0 group-hover:opacity-100 transition`}
+                          title="Xóa"
+                        >
+                           <Trash2 size={14} />
+                        </button>
+                      )}
+                    </div>
                   )}
                 </div>
               </motion.div>
@@ -548,12 +650,35 @@ export default function App() {
                   )}
                 </select>
               </div>
+
+              <div className="pt-2">
+                <label className="block text-xs font-semibold text-gray-600 mb-1">Tỉ lệ Khung Hình</label>
+                <select 
+                  value={imgRatio} 
+                  onChange={e => setImgRatio(e.target.value)}
+                  className="w-full border rounded-lg p-2 text-sm bg-white"
+                >
+                  <option value="16:9">16:9 (Ngang)</option>
+                  <option value="9:16">9:16 (Dọc)</option>
+                  <option value="1:1">1:1 (Vuông)</option>
+                </select>
+              </div>
             </div>
           </div>
 
           <div className="flex justify-end pt-4">
             <button onClick={() => { setShowSettingsDialog(false) }} className="px-4 py-2 text-gray-600 font-medium mr-2">Huỷ</button>
             <button onClick={saveSettings} className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium">Lưu cài đặt</button>
+          </div>
+        </div>
+      </Dialog>
+
+      <Dialog isOpen={confirmConfig.isOpen} onClose={() => setConfirmConfig(prev => ({ ...prev, isOpen: false }))} title={confirmConfig.title}>
+        <div className="space-y-4">
+          <p className="text-gray-700">{confirmConfig.message}</p>
+          <div className="flex justify-end pt-2">
+            <button onClick={() => setConfirmConfig(prev => ({ ...prev, isOpen: false }))} className="px-4 py-2 text-gray-600 font-medium mr-2">Huỷ</button>
+            <button onClick={confirmConfig.onConfirm} className="px-6 py-2 bg-indigo-600 text-white rounded-lg hover:bg-indigo-700 transition font-medium">Đồng ý</button>
           </div>
         </div>
       </Dialog>
@@ -605,6 +730,69 @@ export default function App() {
           </div>
         </div>
       </Dialog>
+
+      {/* Image Viewer Modal */}
+      <AnimatePresence>
+        {viewingImage && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 z-50 flex items-center justify-center bg-black/90 p-4 md:p-10"
+          >
+            <div className="absolute top-4 right-4 z-50 flex gap-2">
+              <a
+                href={viewingImage}
+                download="votan-image.jpg"
+                target="_blank"
+                rel="noreferrer"
+                className="p-3 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors backdrop-blur-sm"
+                title="Tải ảnh"
+              >
+                 <Download size={24} />
+              </a>
+              <button
+                onClick={() => setViewingImage(null)}
+                className="p-3 bg-white/10 hover:bg-white/20 text-white rounded-full transition-colors backdrop-blur-sm"
+                title="Đóng"
+              >
+                <X size={24} />
+              </button>
+            </div>
+            <div className="w-full h-full rounded-2xl overflow-hidden touch-none">
+              <TransformWrapper
+                initialScale={1}
+                minScale={0.5}
+                maxScale={5}
+                centerOnInit
+              >
+                {({ zoomIn, zoomOut, resetTransform }) => (
+                  <div className="w-full h-full relative">
+                    <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-50 flex space-x-4 bg-black/50 backdrop-blur-md rounded-full p-2 border border-white/10">
+                      <button className="p-2 text-white hover:text-indigo-300 transition" onClick={() => zoomOut()}>
+                         <ZoomOut size={24} />
+                      </button>
+                      <button className="p-2 text-white hover:text-indigo-300 transition" onClick={() => resetTransform()}>
+                         <RefreshCcw size={20} />
+                      </button>
+                      <button className="p-2 text-white hover:text-indigo-300 transition" onClick={() => zoomIn()}>
+                         <ZoomIn size={24} />
+                      </button>
+                    </div>
+                    <TransformComponent wrapperClass="!w-full !h-full" contentClass="!w-full !h-full flex items-center justify-center">
+                      <img 
+                        src={viewingImage} 
+                        alt="Zoomed Generate" 
+                        className="max-w-full max-h-full object-contain pointer-events-none select-none"
+                      />
+                    </TransformComponent>
+                  </div>
+                )}
+              </TransformWrapper>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
     </div>
   );
 }

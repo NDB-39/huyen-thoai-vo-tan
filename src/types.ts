@@ -13,6 +13,7 @@ export interface GameSettings {
   imageModelsList: string[];
   currentTextModel: string;
   currentImageModel: string;
+  imageRatio: string;
 }
 
 export interface GameState {
